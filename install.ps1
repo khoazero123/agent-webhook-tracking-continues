@@ -9,6 +9,68 @@ function Set-InstallerConsoleEncoding {
     try { [Console]::InputEncoding = $script:HookUtf8 } catch {}
     try { [Console]::OutputEncoding = $script:HookUtf8 } catch {}
     $script:OutputEncoding = $script:HookUtf8
+    if ($Host.Name -eq "ConsoleHost") {
+        try {
+            $null = cmd.exe /c "chcp 65001 >nul"
+        }
+        catch {}
+    }
+}
+
+function Get-JsonSerializer {
+    Add-Type -AssemblyName System.Web.Extensions
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $serializer.MaxJsonLength = 104857600
+    return $serializer
+}
+
+function Read-DefaultConfig([string]$RepoRoot) {
+    $defaultsPath = Join-Path $RepoRoot "config.defaults.json"
+    $json = [System.IO.File]::ReadAllText($defaultsPath, $script:HookUtf8)
+    $serializer = Get-JsonSerializer
+    return $serializer.DeserializeObject($json)
+}
+
+function Get-ConfigField {
+    param(
+        $Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
+    return $Object.$Name
+}
+
+function Get-StringList {
+    param($Value)
+
+    if ($null -eq $Value) { return @() }
+    return @($Value | ForEach-Object { [string]$_ })
+}
+
+function Build-LocaleDefaults {
+    param(
+        [object]$Config,
+        [string]$Locale
+    )
+
+    $locales = Get-ConfigField $Config "locales"
+    if ($null -eq $locales -or -not (Get-ConfigField $locales $Locale)) {
+        $Locale = "en"
+    }
+
+    $localeConfig = Get-ConfigField $locales $Locale
+    return [pscustomobject]@{
+        locale             = $Locale
+        keywords           = @(Get-StringList (Get-ConfigField $localeConfig "keywords"))
+        continue_message   = [string](Get-ConfigField $localeConfig "continue_message")
+        tail_length        = [int](Get-ConfigField $Config "tail_length")
+        max_continue_loops = [int](Get-ConfigField $Config "max_continue_loops")
+    }
 }
 
 Set-InstallerConsoleEncoding
@@ -45,32 +107,6 @@ function Get-RepoRoot {
     Invoke-WebRequest -Uri "$RawBase/archive/refs/heads/main.zip" -OutFile $zipPath
     Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force
     return (Resolve-Path (Join-Path $tempRoot "agent-webhook-tracking-continues-main")).Path
-}
-
-function Read-DefaultConfig([string]$RepoRoot) {
-    $defaultsPath = Join-Path $RepoRoot "config.defaults.json"
-    $json = [System.IO.File]::ReadAllText($defaultsPath, $script:HookUtf8)
-    return ($json | ConvertFrom-Json)
-}
-
-function Build-LocaleDefaults {
-    param(
-        [object]$Config,
-        [string]$Locale
-    )
-
-    if (-not $Config.locales.$Locale) {
-        $Locale = "en"
-    }
-
-    $localeConfig = $Config.locales.$Locale
-    return [pscustomobject]@{
-        locale             = $Locale
-        keywords           = @($localeConfig.keywords)
-        continue_message   = [string]$localeConfig.continue_message
-        tail_length        = [int]$Config.tail_length
-        max_continue_loops = [int]$Config.max_continue_loops
-    }
 }
 
 function Test-VietnameseText {
@@ -231,11 +267,16 @@ function Prompt-WebhookUrl {
 }
 
 function Prompt-Keywords([object]$Defaults) {
-    $defaultText = ($Defaults.keywords -join ", ")
     Write-Host ""
     Write-Host "Auto-continue keywords (comma-separated, Enter = default):" -ForegroundColor White
     Write-Host "Detected locale: $($Defaults.locale)" -ForegroundColor DarkGray
-    Write-Host "Default: $defaultText" -ForegroundColor DarkGray
+    if ($Defaults.locale -eq "vi") {
+        Write-Host "Default: Vietnamese keyword set (5 configured phrases)" -ForegroundColor DarkGray
+    }
+    else {
+        $defaultText = ($Defaults.keywords -join ", ")
+        Write-Host "Default: $defaultText" -ForegroundColor DarkGray
+    }
     $input = Read-Host "Keywords"
     if ([string]::IsNullOrWhiteSpace($input)) {
         return @($Defaults.keywords)
@@ -260,16 +301,16 @@ function New-HookConfigJson {
         [object]$Defaults
     )
 
-    $config = [ordered]@{
-        source               = $Source
-        webhook_url          = $WebhookUrl
-        keywords             = @($Keywords)
-        tail_length          = [int]$Defaults.tail_length
-        continue_message     = [string]$Defaults.continue_message
-        max_continue_loops   = [int]$Defaults.max_continue_loops
+    $payload = @{
+        source             = $Source
+        webhook_url        = $WebhookUrl
+        keywords           = @($Keywords)
+        tail_length        = [int]$Defaults.tail_length
+        continue_message   = [string]$Defaults.continue_message
+        max_continue_loops = [int]$Defaults.max_continue_loops
     }
-    $json = ($config | ConvertTo-Json -Depth 5)
-    return $json
+    $serializer = Get-JsonSerializer
+    return $serializer.Serialize($payload)
 }
 
 function Install-CursorHooks {
@@ -386,7 +427,7 @@ Write-Host "=================================================" -ForegroundColor 
 $repoRoot = Get-RepoRoot
 Write-Info "Scanning Cursor/Codex transcripts to detect conversation language..."
 $defaults = Resolve-LocaleDefaults -RepoRoot $repoRoot
-Write-Ok "Using $($defaults.locale) defaults (continue message: $($defaults.continue_message))"
+Write-Ok "Using $($defaults.locale) locale defaults"
 
 $webhookUrl = Prompt-WebhookUrl
 $keywords = Prompt-Keywords -Defaults $defaults

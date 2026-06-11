@@ -4,13 +4,13 @@
   "locales": {
     "vi": {
       "keywords": [
-        "tiếp tục",
-        "Bước tiếp",
-        "Việc tiếp",
-        "Bạn muốn",
-        "Bạn có muốn"
+        "ti\u1ebfp t\u1ee5c",
+        "B\u01b0\u1edb c ti\u1ebfp",
+        "Vi\u1ec7c ti\u1ebfp",
+        "B\u1ea1n mu\u1ed1n",
+        "B\u1ea1n c\u00f3 mu\u1ed1n"
       ],
-      "continue_message": "Tiếp tục"
+      "continue_message": "Ti\u1ebfp t\u1ee5c"
     },
     "en": {
       "keywords": [
