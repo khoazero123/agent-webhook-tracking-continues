@@ -17,13 +17,6 @@ function Set-InstallerConsoleEncoding {
     }
 }
 
-function Get-JsonSerializer {
-    Add-Type -AssemblyName System.Web.Extensions
-    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-    $serializer.MaxJsonLength = 104857600
-    return $serializer
-}
-
 function Read-DefaultConfig([string]$RepoRoot) {
     $defaultsPath = Join-Path $RepoRoot "config.defaults.json"
     $json = [System.IO.File]::ReadAllText($defaultsPath, $script:HookUtf8)
@@ -354,7 +347,7 @@ function Prompt-Keywords([object]$Defaults) {
     if ([string]::IsNullOrWhiteSpace($input)) {
         return @()
     }
-    return @($input.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return [string[]](@($input.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }))
 }
 
 function Prompt-ContinueMessage {
@@ -383,20 +376,29 @@ function New-HookConfigJson {
     param(
         [string]$WebhookUrl,
         [string]$Source,
-        [object[]]$Keywords,
-        [object]$Defaults
+        [string[]]$Keywords,
+        [int]$TailLength,
+        [string]$ContinueMessage,
+        [int]$MaxContinueLoops
     )
 
-    $payload = @{
-        source             = $Source
-        webhook_url        = $WebhookUrl
-        keywords           = @($Keywords)
-        tail_length        = [int]$Defaults.tail_length
-        continue_message   = [string]$Defaults.continue_message
-        max_continue_loops = [int]$Defaults.max_continue_loops
+    $keywordList = New-Object System.Collections.Generic.List[string]
+    foreach ($keyword in @($Keywords)) {
+        $text = [string]$keyword
+        if (-not [string]::IsNullOrWhiteSpace($text)) {
+            [void]$keywordList.Add($text.Trim())
+        }
     }
-    $serializer = Get-JsonSerializer
-    return $serializer.Serialize($payload)
+
+    $payload = [ordered]@{
+        source             = [string]$Source
+        webhook_url        = [string]$WebhookUrl
+        keywords           = $keywordList.ToArray()
+        tail_length        = [int]$TailLength
+        continue_message   = [string]$ContinueMessage
+        max_continue_loops = [int]$MaxContinueLoops
+    }
+    return ($payload | ConvertTo-Json -Compress -Depth 5)
 }
 
 function Install-CursorHooks {
@@ -418,7 +420,13 @@ function Install-CursorHooks {
     Copy-Item -Path (Join-Path $runtimeDir "auto-continue-flag.*") -Destination $hooksDir -Force
     Copy-Item -Path (Join-Path $runtimeDir "auto-continue-stop.*") -Destination $hooksDir -Force
 
-    $configJson = New-HookConfigJson -WebhookUrl $WebhookUrl -Source "cursor" -Keywords $Keywords -Defaults $Defaults
+    $configJson = New-HookConfigJson `
+        -WebhookUrl $WebhookUrl `
+        -Source "cursor" `
+        -Keywords $Keywords `
+        -TailLength ([int]$Defaults.tail_length) `
+        -ContinueMessage ([string]$Defaults.continue_message) `
+        -MaxContinueLoops ([int]$Defaults.max_continue_loops)
     [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, $script:HookUtf8)
 
     $hooksJson = @{
@@ -460,7 +468,13 @@ function Install-CodexHooks {
     Copy-Item -Path (Join-Path $runtimeDir "codex-user-prompt-webhook.*") -Destination $hooksDir -Force
     Copy-Item -Path (Join-Path $runtimeDir "codex-stop-webhook-continue.*") -Destination $hooksDir -Force
 
-    $configJson = New-HookConfigJson -WebhookUrl $WebhookUrl -Source "codex" -Keywords $Keywords -Defaults $Defaults
+    $configJson = New-HookConfigJson `
+        -WebhookUrl $WebhookUrl `
+        -Source "codex" `
+        -Keywords $Keywords `
+        -TailLength ([int]$Defaults.tail_length) `
+        -ContinueMessage ([string]$Defaults.continue_message) `
+        -MaxContinueLoops ([int]$Defaults.max_continue_loops)
     [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, $script:HookUtf8)
 
     $promptPs1 = (Join-Path $hooksDir "codex-user-prompt-webhook.ps1")
