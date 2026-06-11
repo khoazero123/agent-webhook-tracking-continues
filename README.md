@@ -1,6 +1,6 @@
 # Agent Webhook + Auto Continue
 
-Automated installer for **Cursor** and **Codex**: sends webhooks when the user or agent chats, and automatically sends **"Tiếp tục"** when keywords are detected in the last 1000 characters of the agent response.
+Automated installer for **Cursor** and **Codex**: sends webhooks when the user or agent chats, and automatically sends a continue follow-up when keywords are detected in the last 1000 characters of the agent response.
 
 ## Quick install
 
@@ -24,17 +24,24 @@ wget -qO- https://raw.githubusercontent.com/khoazero123/agent-webhook-tracking-c
 
 ## Installation flow
 
-The script will ask for:
+The script scans existing **Cursor** and **Codex** conversation transcripts to detect whether user/agent messages contain Vietnamese text. Based on that:
+
+- **Vietnamese detected** → default keywords and continue message in Vietnamese
+- **No Vietnamese found** → English defaults for international users
+
+It will then ask for:
 
 1. **Webhook URL** — leave empty to disable webhooks
-2. **Auto-continue keywords** — defaults:
-   - `tiếp tục`
-   - `Bước tiếp`
-   - `Việc tiếp`
-   - `Bạn muốn`
-   - `Bạn có muốn`
+2. **Auto-continue keywords** — defaults depend on detected locale:
+   - Vietnamese: `tiếp tục`, `Bước tiếp`, `Việc tiếp`, `Bạn muốn`, `Bạn có muốn`
+   - English: `continue`, `next step`, `what's next`, `would you like`, `do you want`
 3. **Cursor** — yes/no
 4. **Codex** — yes/no
+
+Transcript locations scanned:
+
+- Cursor: `~/.cursor/projects/*/agent-transcripts/**/*.jsonl`
+- Codex: `~/.codex/sessions/**/*.jsonl` (or `$CODEX_HOME/sessions`)
 
 ## Files created
 
@@ -63,9 +70,9 @@ Codex uses `session_id` / `turn_id` instead of `conversation_id`.
 
 - Only scans the **last 1000 characters** of the agent response
 - Case-insensitive matching
-- Requires Vietnamese diacritics (e.g. `tiếp tục` matches, `tiep tuc` does not)
-- Cursor: `stop` hook sends `followup_message: "Tiếp tục"` (default max 10 loops)
-- Codex: `Stop` hook returns `{ "decision": "block", "reason": "Tiếp tục" }`
+- Vietnamese locale requires diacritics (e.g. `tiếp tục` matches, `tiep tuc` does not)
+- Cursor: `stop` hook sends `followup_message` from config (default `Tiếp tục` or `Continue`, max 10 loops)
+- Codex: `Stop` hook returns `{ "decision": "block", "reason": "<continue_message>" }`
 
 ## Logs
 

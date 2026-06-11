@@ -1,12 +1,26 @@
 {
-  "keywords": [
-    "tiếp tục",
-    "Bước tiếp",
-    "Việc tiếp",
-    "Bạn muốn",
-    "Bạn có muốn"
-  ],
   "tail_length": 1000,
-  "continue_message": "Tiếp tục",
-  "max_continue_loops": 10
+  "max_continue_loops": 10,
+  "locales": {
+    "vi": {
+      "keywords": [
+        "tiếp tục",
+        "Bước tiếp",
+        "Việc tiếp",
+        "Bạn muốn",
+        "Bạn có muốn"
+      ],
+      "continue_message": "Tiếp tục"
+    },
+    "en": {
+      "keywords": [
+        "continue",
+        "next step",
+        "what's next",
+        "would you like",
+        "do you want"
+      ],
+      "continue_message": "Continue"
+    }
+  }
 }

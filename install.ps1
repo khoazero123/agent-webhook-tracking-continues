@@ -43,6 +43,194 @@ function Read-DefaultConfig([string]$RepoRoot) {
     return Get-Content $defaultsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Get-PythonCommand {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) { return $python.Source }
+    $python3 = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($python3) { return $python3.Source }
+    return $null
+}
+
+function Test-VietnameseText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return [regex]::IsMatch(
+        $Text,
+        '[\u00C0-\u00C3\u00C8-\u00CA\u00CC-\u00CD\u00D2-\u00D5\u00D9-\u00DA\u00DD\u0102\u0103\u0110\u0111\u0128\u0129\u0168\u0169\u01A0\u01A1\u01AF\u01B0\u1EA0-\u1EF9]'
+    )
+}
+
+function Get-NormalizedUserText {
+    param([string]$Text)
+    if ($Text -match '(?is)<user_query>\s*(.*?)\s*</user_query>') {
+        return $Matches[1].Trim()
+    }
+    return $Text.Trim()
+}
+
+function Test-SkipTranscriptText {
+    param([string]$Text)
+    $trimmed = $Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return $true }
+    $prefixes = @(
+        '<environment_context>',
+        '<permissions',
+        '<app-context>',
+        '<collaboration_mode>',
+        '<skills_instructions>',
+        '<plugins_instructions>'
+    )
+    foreach ($prefix in $prefixes) {
+        if ($trimmed.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-TranscriptTextFromCursorLine {
+    param([string]$Line)
+    try {
+        $obj = $Line | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return ""
+    }
+    if ($obj.role -notin @("user", "assistant")) { return "" }
+    $chunks = @()
+    $content = @($obj.message.content)
+    foreach ($part in $content) {
+        if ($part.type -ne "text") { continue }
+        $text = [string]$part.text
+        if (Test-SkipTranscriptText -Text $text) { continue }
+        $chunks += (Get-NormalizedUserText -Text $text)
+    }
+    return ($chunks -join "`n")
+}
+
+function Get-TranscriptTextFromCodexLine {
+    param([string]$Line)
+    try {
+        $obj = $Line | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return ""
+    }
+    if ($obj.type -ne "response_item") { return "" }
+    if ($obj.payload.type -ne "message") { return "" }
+    if ($obj.payload.role -notin @("user", "assistant")) { return "" }
+    $chunks = @()
+    $content = @($obj.payload.content)
+    foreach ($part in $content) {
+        if ($part.type -notin @("input_text", "output_text", "text")) { continue }
+        $text = [string]$part.text
+        if (Test-SkipTranscriptText -Text $text) { continue }
+        $chunks += (Get-NormalizedUserText -Text $text)
+    }
+    return ($chunks -join "`n")
+}
+
+function Find-TranscriptFiles {
+    $files = New-Object System.Collections.Generic.List[string]
+    $cursorRoot = Join-Path $env:USERPROFILE ".cursor\projects"
+    if (Test-Path $cursorRoot) {
+        Get-ChildItem -Path $cursorRoot -Filter "*.jsonl" -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "agent-transcripts" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 40 |
+            ForEach-Object { $files.Add($_.FullName) | Out-Null }
+    }
+
+    $codexRoots = @((Join-Path $env:USERPROFILE ".codex"))
+    if ($env:CODEX_HOME) { $codexRoots += $env:CODEX_HOME }
+    foreach ($codexRoot in ($codexRoots | Select-Object -Unique)) {
+        $sessionsRoot = Join-Path $codexRoot "sessions"
+        if (-not (Test-Path $sessionsRoot)) { continue }
+        Get-ChildItem -Path $sessionsRoot -Filter "*.jsonl" -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 40 |
+            ForEach-Object { $files.Add($_.FullName) | Out-Null }
+    }
+
+    return @($files | Select-Object -Unique)
+}
+
+function Detect-LocaleFromTranscripts {
+    $files = Find-TranscriptFiles
+    if ($files.Count -eq 0) { return "en" }
+
+    $sampledBytes = 0
+    $maxBytes = 512000
+    foreach ($file in $files) {
+        if ($sampledBytes -ge $maxBytes) { break }
+        try {
+            $reader = [System.IO.File]::OpenText($file)
+            try {
+                while (($line = $reader.ReadLine()) -ne $null) {
+                    if ($sampledBytes -ge $maxBytes) { break }
+                    $text = Get-TranscriptTextFromCursorLine -Line $line
+                    if ([string]::IsNullOrWhiteSpace($text)) {
+                        $text = Get-TranscriptTextFromCodexLine -Line $line
+                    }
+                    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+                    $sampledBytes += [System.Text.Encoding]::UTF8.GetByteCount($text)
+                    if (Test-VietnameseText -Text $text) {
+                        return "vi"
+                    }
+                }
+            }
+            finally {
+                $reader.Close()
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    return "en"
+}
+
+function Resolve-LocaleDefaults {
+    param([string]$RepoRoot)
+
+    $configPath = Join-Path $RepoRoot "config.defaults.json"
+    $python = Get-PythonCommand
+    if ($python) {
+        $scriptPath = Join-Path $RepoRoot "scripts\locale_defaults.py"
+        if (Test-Path $scriptPath) {
+            $previousEncoding = $env:PYTHONIOENCODING
+            $env:PYTHONIOENCODING = "utf-8"
+            try {
+                $json = (& $python $scriptPath resolve auto $configPath | Out-String).Trim()
+            }
+            finally {
+                if ($null -eq $previousEncoding) {
+                    Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
+                }
+                else {
+                    $env:PYTHONIOENCODING = $previousEncoding
+                }
+            }
+            return ($json | ConvertFrom-Json)
+        }
+    }
+
+    $config = Read-DefaultConfig -RepoRoot $RepoRoot
+    $locale = Detect-LocaleFromTranscripts
+    if (-not $config.locales.$locale) {
+        $locale = "en"
+    }
+    $localeConfig = $config.locales.$locale
+    return [pscustomobject]@{
+        locale             = $locale
+        keywords           = @($localeConfig.keywords)
+        continue_message   = [string]$localeConfig.continue_message
+        tail_length        = [int]$config.tail_length
+        max_continue_loops = [int]$config.max_continue_loops
+    }
+}
+
 function Prompt-WebhookUrl {
     Write-Host ""
     Write-Host "Webhook URL (leave empty to disable webhooks):" -ForegroundColor White
@@ -54,6 +242,7 @@ function Prompt-Keywords([object]$Defaults) {
     $defaultText = ($Defaults.keywords -join ", ")
     Write-Host ""
     Write-Host "Auto-continue keywords (comma-separated, Enter = default):" -ForegroundColor White
+    Write-Host "Detected locale: $($Defaults.locale)" -ForegroundColor DarkGray
     Write-Host "Default: $defaultText" -ForegroundColor DarkGray
     $input = Read-Host "Keywords"
     if ([string]::IsNullOrWhiteSpace($input)) {
@@ -202,7 +391,9 @@ Write-Host "Agent Webhook + Auto Continue Installer (Windows)" -ForegroundColor 
 Write-Host "=================================================" -ForegroundColor Magenta
 
 $repoRoot = Get-RepoRoot
-$defaults = Read-DefaultConfig -RepoRoot $repoRoot
+Write-Info "Scanning Cursor/Codex transcripts to detect conversation language..."
+$defaults = Resolve-LocaleDefaults -RepoRoot $repoRoot
+Write-Ok "Using $($defaults.locale) defaults (continue message: $($defaults.continue_message))"
 
 $webhookUrl = Prompt-WebhookUrl
 $keywords = Prompt-Keywords -Defaults $defaults

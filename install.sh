@@ -52,8 +52,10 @@ prompt_webhook_url() {
 
 prompt_keywords() {
   local defaults="$1"
+  local locale="$2"
   echo
   echo "Auto-continue keywords (comma-separated, Enter = default):"
+  echo "Detected locale: $locale"
   echo "Default: $defaults"
   read -r -p "Keywords: " input || true
   input="${input//$'\r'/}"
@@ -95,28 +97,36 @@ python_bin() {
   fi
 }
 
+resolve_locale_defaults() {
+  local repo_root="$1"
+  local py="$2"
+  local defaults_file="$repo_root/config.defaults.json"
+  "$py" "$repo_root/scripts/locale_defaults.py" resolve auto "$defaults_file"
+}
+
 write_hook_config() {
   local target_dir="$1"
   local webhook_url="$2"
   local source="$3"
   local keywords_csv="$4"
-  local defaults_file="$5"
+  local tail_length="$5"
+  local max_loops="$6"
+  local continue_message="$7"
 
-  python3 - "$target_dir" "$webhook_url" "$source" "$keywords_csv" "$defaults_file" <<'PY'
+  python3 - "$target_dir" "$webhook_url" "$source" "$keywords_csv" "$tail_length" "$max_loops" "$continue_message" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-target_dir, webhook_url, source, keywords_csv, defaults_file = sys.argv[1:6]
-defaults = json.loads(Path(defaults_file).read_text(encoding="utf-8"))
+target_dir, webhook_url, source, keywords_csv, tail_length, max_loops, continue_message = sys.argv[1:8]
 keywords = [k.strip() for k in keywords_csv.split(",") if k.strip()]
 config = {
     "source": source,
     "webhook_url": webhook_url,
     "keywords": keywords,
-    "tail_length": defaults.get("tail_length", 1000),
-    "continue_message": defaults.get("continue_message", "Tiếp tục"),
-    "max_continue_loops": defaults.get("max_continue_loops", 10),
+    "tail_length": int(tail_length),
+    "continue_message": continue_message,
+    "max_continue_loops": int(max_loops),
 }
 Path(target_dir, "hook-config.json").write_text(
     json.dumps(config, ensure_ascii=False, indent=2) + "\n",
@@ -130,17 +140,17 @@ install_cursor_hooks() {
   local webhook_url="$2"
   local keywords_csv="$3"
   local py="$4"
-  local defaults_file="$repo_root/config.defaults.json"
+  local tail_length="$5"
+  local max_loops="$6"
+  local continue_message="$7"
   local cursor_root="$HOME/.cursor"
   local hooks_dir="$cursor_root/hooks"
-  local max_loops
-  max_loops="$(python3 -c "import json;print(json.load(open('$defaults_file',encoding='utf-8')).get('max_continue_loops',10))")"
 
   mkdir -p "$hooks_dir"
   cp "$repo_root/runtime/unix/"*.py "$hooks_dir/"
   chmod +x "$hooks_dir/"*.py
 
-  write_hook_config "$hooks_dir" "$webhook_url" "cursor" "$keywords_csv" "$defaults_file"
+  write_hook_config "$hooks_dir" "$webhook_url" "cursor" "$keywords_csv" "$tail_length" "$max_loops" "$continue_message"
 
   cat > "$cursor_root/hooks.json" <<EOF
 {
@@ -166,7 +176,9 @@ install_codex_hooks() {
   local webhook_url="$2"
   local keywords_csv="$3"
   local py="$4"
-  local defaults_file="$repo_root/config.defaults.json"
+  local tail_length="$5"
+  local max_loops="$6"
+  local continue_message="$7"
   local codex_root="$HOME/.codex"
   local hooks_dir="$codex_root/hooks"
 
@@ -174,7 +186,7 @@ install_codex_hooks() {
   cp "$repo_root/runtime/unix/"*.py "$hooks_dir/"
   chmod +x "$hooks_dir/"*.py
 
-  write_hook_config "$hooks_dir" "$webhook_url" "codex" "$keywords_csv" "$defaults_file"
+  write_hook_config "$hooks_dir" "$webhook_url" "codex" "$keywords_csv" "$tail_length" "$max_loops" "$continue_message"
 
   cat > "$codex_root/hooks.json" <<EOF
 {
@@ -215,9 +227,9 @@ main() {
   echo "Agent Webhook + Auto Continue Installer (Unix)"
   echo "=============================================="
 
-  local repo_root defaults_file webhook_url keywords_input keywords_csv py
+  local repo_root py defaults_json locale default_keywords keywords_input keywords_csv
+  local tail_length max_loops continue_message webhook_url
   repo_root="$(get_repo_root)"
-  defaults_file="$repo_root/config.defaults.json"
 
   py="$(python_bin)"
   if [[ -z "$py" ]]; then
@@ -225,11 +237,17 @@ main() {
     exit 1
   fi
 
-  local default_keywords
-  default_keywords="$(python3 -c "import json;print(', '.join(json.load(open('$defaults_file',encoding='utf-8'))['keywords']))")"
+  info "Scanning Cursor/Codex transcripts to detect conversation language..."
+  defaults_json="$(resolve_locale_defaults "$repo_root" "$py")"
+  locale="$(echo "$defaults_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['locale'])")"
+  default_keywords="$(echo "$defaults_json" | python3 -c "import json,sys; print(', '.join(json.load(sys.stdin)['keywords']))")"
+  continue_message="$(echo "$defaults_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['continue_message'])")"
+  tail_length="$(echo "$defaults_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['tail_length'])")"
+  max_loops="$(echo "$defaults_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['max_continue_loops'])")"
+  ok "Using $locale defaults (continue message: $continue_message)"
 
   webhook_url="$(prompt_webhook_url)"
-  keywords_input="$(prompt_keywords "$default_keywords")"
+  keywords_input="$(prompt_keywords "$default_keywords" "$locale")"
   keywords_csv="$keywords_input"
 
   local install_cursor=no install_codex=no
@@ -242,11 +260,11 @@ main() {
   fi
 
   if [[ "$install_cursor" == "yes" ]]; then
-    install_cursor_hooks "$repo_root" "$webhook_url" "$keywords_csv" "$py"
+    install_cursor_hooks "$repo_root" "$webhook_url" "$keywords_csv" "$py" "$tail_length" "$max_loops" "$continue_message"
   fi
 
   if [[ "$install_codex" == "yes" ]]; then
-    install_codex_hooks "$repo_root" "$webhook_url" "$keywords_csv" "$py"
+    install_codex_hooks "$repo_root" "$webhook_url" "$keywords_csv" "$py" "$tail_length" "$max_loops" "$continue_message"
   fi
 
   echo
