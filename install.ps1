@@ -3,6 +3,15 @@ $ErrorActionPreference = "Stop"
 
 $RepoHttps = "https://github.com/khoazero123/agent-webhook-tracking-continues.git"
 $RawBase = "https://raw.githubusercontent.com/khoazero123/agent-webhook-tracking-continues/main"
+$script:HookUtf8 = [System.Text.UTF8Encoding]::new($false)
+
+function Set-InstallerConsoleEncoding {
+    try { [Console]::InputEncoding = $script:HookUtf8 } catch {}
+    try { [Console]::OutputEncoding = $script:HookUtf8 } catch {}
+    $script:OutputEncoding = $script:HookUtf8
+}
+
+Set-InstallerConsoleEncoding
 
 function Write-Info([string]$Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -40,15 +49,28 @@ function Get-RepoRoot {
 
 function Read-DefaultConfig([string]$RepoRoot) {
     $defaultsPath = Join-Path $RepoRoot "config.defaults.json"
-    return Get-Content $defaultsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $json = [System.IO.File]::ReadAllText($defaultsPath, $script:HookUtf8)
+    return ($json | ConvertFrom-Json)
 }
 
-function Get-PythonCommand {
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) { return $python.Source }
-    $python3 = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($python3) { return $python3.Source }
-    return $null
+function Build-LocaleDefaults {
+    param(
+        [object]$Config,
+        [string]$Locale
+    )
+
+    if (-not $Config.locales.$Locale) {
+        $Locale = "en"
+    }
+
+    $localeConfig = $Config.locales.$Locale
+    return [pscustomobject]@{
+        locale             = $Locale
+        keywords           = @($localeConfig.keywords)
+        continue_message   = [string]$localeConfig.continue_message
+        tail_length        = [int]$Config.tail_length
+        max_continue_loops = [int]$Config.max_continue_loops
+    }
 }
 
 function Test-VietnameseText {
@@ -194,41 +216,11 @@ function Detect-LocaleFromTranscripts {
 function Resolve-LocaleDefaults {
     param([string]$RepoRoot)
 
-    $configPath = Join-Path $RepoRoot "config.defaults.json"
-    $python = Get-PythonCommand
-    if ($python) {
-        $scriptPath = Join-Path $RepoRoot "scripts\locale_defaults.py"
-        if (Test-Path $scriptPath) {
-            $previousEncoding = $env:PYTHONIOENCODING
-            $env:PYTHONIOENCODING = "utf-8"
-            try {
-                $json = (& $python $scriptPath resolve auto $configPath | Out-String).Trim()
-            }
-            finally {
-                if ($null -eq $previousEncoding) {
-                    Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue
-                }
-                else {
-                    $env:PYTHONIOENCODING = $previousEncoding
-                }
-            }
-            return ($json | ConvertFrom-Json)
-        }
-    }
-
+    # Use native PowerShell on Windows so Vietnamese text is not corrupted when
+    # capturing Python stdout through the system code page.
     $config = Read-DefaultConfig -RepoRoot $RepoRoot
     $locale = Detect-LocaleFromTranscripts
-    if (-not $config.locales.$locale) {
-        $locale = "en"
-    }
-    $localeConfig = $config.locales.$locale
-    return [pscustomobject]@{
-        locale             = $locale
-        keywords           = @($localeConfig.keywords)
-        continue_message   = [string]$localeConfig.continue_message
-        tail_length        = [int]$config.tail_length
-        max_continue_loops = [int]$config.max_continue_loops
-    }
+    return (Build-LocaleDefaults -Config $config -Locale $locale)
 }
 
 function Prompt-WebhookUrl {
@@ -276,7 +268,8 @@ function New-HookConfigJson {
         continue_message     = [string]$Defaults.continue_message
         max_continue_loops   = [int]$Defaults.max_continue_loops
     }
-    return ($config | ConvertTo-Json -Depth 5)
+    $json = ($config | ConvertTo-Json -Depth 5)
+    return $json
 }
 
 function Install-CursorHooks {
@@ -299,7 +292,7 @@ function Install-CursorHooks {
     Copy-Item -Path (Join-Path $runtimeDir "auto-continue-stop.*") -Destination $hooksDir -Force
 
     $configJson = New-HookConfigJson -WebhookUrl $WebhookUrl -Source "cursor" -Keywords $Keywords -Defaults $Defaults
-    [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, $script:HookUtf8)
 
     $hooksJson = @{
         version = 1
@@ -319,7 +312,7 @@ function Install-CursorHooks {
 
     $hooksPath = Join-Path $cursorRoot "hooks.json"
     $hooksText = ($hooksJson | ConvertTo-Json -Depth 6)
-    [System.IO.File]::WriteAllText($hooksPath, $hooksText, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($hooksPath, $hooksText, $script:HookUtf8)
     Write-Ok "Installed Cursor hooks at $hooksDir"
 }
 
@@ -341,7 +334,7 @@ function Install-CodexHooks {
     Copy-Item -Path (Join-Path $runtimeDir "codex-stop-webhook-continue.*") -Destination $hooksDir -Force
 
     $configJson = New-HookConfigJson -WebhookUrl $WebhookUrl -Source "codex" -Keywords $Keywords -Defaults $Defaults
-    [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $hooksDir "hook-config.json"), $configJson, $script:HookUtf8)
 
     $promptPs1 = (Join-Path $hooksDir "codex-user-prompt-webhook.ps1")
     $stopPs1 = (Join-Path $hooksDir "codex-stop-webhook-continue.ps1")
@@ -381,7 +374,7 @@ function Install-CodexHooks {
 
     $hooksPath = Join-Path $codexRoot "hooks.json"
     $hooksText = ($hooksJson | ConvertTo-Json -Depth 8)
-    [System.IO.File]::WriteAllText($hooksPath, $hooksText, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($hooksPath, $hooksText, $script:HookUtf8)
     Write-Ok "Installed Codex hooks at $hooksDir"
     Write-Warn "In Codex, run /hooks to trust hooks after installing."
 }
