@@ -27,40 +27,7 @@ function Get-JsonSerializer {
 function Read-DefaultConfig([string]$RepoRoot) {
     $defaultsPath = Join-Path $RepoRoot "config.defaults.json"
     $json = [System.IO.File]::ReadAllText($defaultsPath, $script:HookUtf8)
-    $serializer = Get-JsonSerializer
-    return $serializer.DeserializeObject($json)
-}
-
-function Get-ConfigField {
-    param(
-        $Object,
-        [string]$Name
-    )
-
-    if ($null -eq $Object) { return $null }
-
-    if ($Object -is [System.Collections.IDictionary]) {
-        foreach ($key in @($Object.Keys)) {
-            if ([string]$key -eq $Name) {
-                return $Object[$key]
-            }
-        }
-        return $null
-    }
-
-    $prop = $Object.PSObject.Properties[$Name]
-    if ($null -ne $prop) {
-        return $prop.Value
-    }
-
-    return $null
-}
-
-function Get-StringList {
-    param($Value)
-
-    if ($null -eq $Value) { return @() }
-    return @($Value | ForEach-Object { [string]$_ })
+    return ($json | ConvertFrom-Json)
 }
 
 function Build-LocaleDefaults {
@@ -69,18 +36,18 @@ function Build-LocaleDefaults {
         [string]$Locale
     )
 
-    $locales = Get-ConfigField $Config "locales"
-    if ($null -eq $locales -or -not (Get-ConfigField $locales $Locale)) {
+    $localeProperty = $Config.locales.PSObject.Properties[$Locale]
+    if ($null -eq $localeProperty) {
         $Locale = "en"
     }
 
-    $localeConfig = Get-ConfigField $locales $Locale
+    $localeConfig = $Config.locales.$Locale
     return [pscustomobject]@{
         locale             = $Locale
-        keywords           = @(Get-StringList (Get-ConfigField $localeConfig "keywords"))
-        continue_message   = [string](Get-ConfigField $localeConfig "continue_message")
-        tail_length        = [int](Get-ConfigField $Config "tail_length")
-        max_continue_loops = [int](Get-ConfigField $Config "max_continue_loops")
+        keywords           = @($localeConfig.keywords | ForEach-Object { [string]$_ })
+        continue_message   = [string]$localeConfig.continue_message
+        tail_length        = [int]$Config.tail_length
+        max_continue_loops = [int]$Config.max_continue_loops
     }
 }
 
@@ -263,10 +230,8 @@ function Detect-LocaleFromTranscripts {
 function Resolve-LocaleDefaults {
     param([string]$RepoRoot)
 
-    # Use native PowerShell on Windows so Vietnamese text is not corrupted when
-    # capturing Python stdout through the system code page.
-    $config = Read-DefaultConfig -RepoRoot $RepoRoot
     $locale = Detect-LocaleFromTranscripts
+    $config = Read-DefaultConfig -RepoRoot $RepoRoot
     return (Build-LocaleDefaults -Config $config -Locale $locale)
 }
 
